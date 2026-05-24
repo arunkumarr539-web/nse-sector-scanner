@@ -6,7 +6,7 @@ from sector_universe import SECTOR_STOCKS
 
 st.set_page_config(page_title="NSE Sector Scanner", layout="wide")
 
-st.title("📊 NSE Sector & Stock Scanner")
+st.title("📊 NSE Strong Sector Active Stock Scanner")
 
 api_key = st.text_input("Kite API Key")
 access_token = st.text_input("Kite Access Token", type="password")
@@ -99,7 +99,7 @@ def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     if change_pct < -2:
         r_factor += 2
 
-    # Relative volume
+    # Volume strength
     if rvol > 1.5:
         r_factor += 3
     if rvol > 2:
@@ -107,7 +107,7 @@ def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     if rvol > 3:
         r_factor += 2
 
-    # Relative turnover
+    # Turnover strength
     if rturnover > 1.5:
         r_factor += 2
     if rturnover > 2:
@@ -115,7 +115,7 @@ def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     if rturnover > 3:
         r_factor += 2
 
-    # Futures OI expansion
+    # Futures OI strength
     if oi_ratio > 1.2:
         r_factor += 2
     if oi_ratio > 1.5:
@@ -257,83 +257,70 @@ if st.button("Run Scanner"):
 
         if not results:
             st.warning("No results found.")
+
         else:
             result_df = pd.DataFrame(results)
 
-            long_df = result_df[result_df["Direction"] == "LONG"]
-            short_df = result_df[result_df["Direction"] == "SHORT"]
+            active_df = result_df[result_df["R-Factor"] > 0]
 
-            st.subheader("📈 Strong Long Sectors")
+            if active_df.empty:
+                st.warning("No high activity stocks found.")
 
-            if not long_df.empty:
-                long_sector = (
-                    long_df.groupby("Sector")
+            else:
+                sector_strength = (
+                    active_df.groupby(["Sector", "Direction"])
                     .agg({
                         "R-Factor": "mean",
-                        "Change %": "mean",
+                        "Turnover Cr": "sum",
                         "RVOL": "mean",
                         "RTurnover": "mean",
                         "OI Ratio": "mean",
-                        "Turnover Cr": "sum",
                         "Stock": "count"
                     })
                     .reset_index()
-                    .rename(columns={
-                        "Stock": "Active Stocks",
-                        "R-Factor": "Sector Strength"
-                    })
-                    .sort_values(by="Sector Strength", ascending=False)
+                    .rename(columns={"Stock": "Active Stocks"})
+                    .sort_values(by="R-Factor", ascending=False)
                 )
 
-                st.dataframe(long_sector, use_container_width=True)
-            else:
-                st.info("No long sectors found.")
+                top_sectors = sector_strength.head(3)["Sector"].tolist()
 
-            st.subheader("📉 Strong Short Sectors")
-
-            if not short_df.empty:
-                short_sector = (
-                    short_df.groupby("Sector")
-                    .agg({
-                        "R-Factor": "mean",
-                        "Change %": "mean",
-                        "RVOL": "mean",
-                        "RTurnover": "mean",
-                        "OI Ratio": "mean",
-                        "Turnover Cr": "sum",
-                        "Stock": "count"
-                    })
-                    .reset_index()
-                    .rename(columns={
-                        "Stock": "Active Stocks",
-                        "R-Factor": "Sector Strength"
-                    })
-                    .sort_values(by="Sector Strength", ascending=False)
+                top_active_stocks = (
+                    active_df[active_df["Sector"].isin(top_sectors)]
+                    .sort_values(
+                        by=["R-Factor", "Turnover Cr"],
+                        ascending=False
+                    )
+                    .head(20)
                 )
 
-                st.dataframe(short_sector, use_container_width=True)
-            else:
-                st.info("No short sectors found.")
+                st.subheader("🔥 Strong Sectors")
 
-            st.subheader("💰 Turnover Leaders")
+                st.dataframe(
+                    sector_strength.head(5),
+                    use_container_width=True
+                )
 
-            turnover_df = result_df.sort_values(
-                by="Turnover Cr",
-                ascending=False
-            ).head(20)
+                st.subheader("🚀 Top Active Stocks From Strong Sectors")
 
-            st.dataframe(turnover_df, use_container_width=True)
+                st.dataframe(
+                    top_active_stocks[
+                        [
+                            "Sector",
+                            "Stock",
+                            "Direction",
+                            "Change %",
+                            "RVOL",
+                            "RTurnover",
+                            "OI Ratio",
+                            "Turnover Cr",
+                            "Spread %",
+                            "R-Factor"
+                        ]
+                    ],
+                    use_container_width=True
+                )
 
-            st.subheader("🔥 Top R-Factor Stocks")
-
-            top_stocks = result_df.sort_values(
-                by="R-Factor",
-                ascending=False
-            ).head(30)
-
-            st.dataframe(top_stocks, use_container_width=True)
-
-            st.success("Scanner completed successfully.")
+                st.success("Scanner completed successfully.")
 
     except Exception as e:
         st.error(str(e))
