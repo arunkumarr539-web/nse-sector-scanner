@@ -2,11 +2,14 @@ import streamlit as st
 import pandas as pd
 from kiteconnect import KiteConnect
 from datetime import datetime, timedelta
+from streamlit_autorefresh import st_autorefresh
 from sector_universe import SECTOR_STOCKS
 
 st.set_page_config(page_title="NSE Sector Scanner", layout="wide")
 
-st.title("📊 NSE Strong Sector Active Stock Scanner")
+st.title("📊 NSE Sector & Stock Scanner")
+
+st_autorefresh(interval=60 * 1000, key="scanner_refresh")
 
 api_key = st.text_input("Kite API Key")
 access_token = st.text_input("Kite Access Token", type="password")
@@ -21,6 +24,7 @@ def calculate_spread(q):
             return None
 
         return round(((sell - buy) / buy) * 100, 3)
+
     except Exception:
         return None
 
@@ -89,7 +93,6 @@ def get_20d_fut_oi(kite, fut_token):
 def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     r_factor = 0
 
-    # Price strength
     if change_pct > 1:
         r_factor += 2
     if change_pct > 2:
@@ -99,7 +102,6 @@ def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     if change_pct < -2:
         r_factor += 2
 
-    # Volume strength
     if rvol > 1.5:
         r_factor += 3
     if rvol > 2:
@@ -107,7 +109,6 @@ def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     if rvol > 3:
         r_factor += 2
 
-    # Turnover strength
     if rturnover > 1.5:
         r_factor += 2
     if rturnover > 2:
@@ -115,7 +116,6 @@ def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     if rturnover > 3:
         r_factor += 2
 
-    # Futures OI strength
     if oi_ratio > 1.2:
         r_factor += 2
     if oi_ratio > 1.5:
@@ -123,7 +123,6 @@ def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     if oi_ratio > 2:
         r_factor += 2
 
-    # Spread quality
     if spread is not None and spread < 0.15:
         r_factor += 2
     elif spread is not None and spread > 0.5:
@@ -132,135 +131,140 @@ def calculate_r_factor(change_pct, rvol, rturnover, oi_ratio, spread):
     return r_factor
 
 
-if st.button("Run Scanner"):
+def run_scanner(api_key, access_token):
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
 
-    try:
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
+    nse_instruments = kite.instruments("NSE")
 
-        st.info("Fetching NSE instruments...")
-        nse_instruments = kite.instruments("NSE")
+    instrument_map = {
+        item["tradingsymbol"]: item["instrument_token"]
+        for item in nse_instruments
+    }
 
-        instrument_map = {
-            item["tradingsymbol"]: item["instrument_token"]
-            for item in nse_instruments
-        }
+    futures_map = get_current_month_futures_map(kite)
 
-        st.info("Fetching futures instruments...")
-        futures_map = get_current_month_futures_map(kite)
+    results = []
 
-        results = []
+    total_stocks = sum(len(stocks) for stocks in SECTOR_STOCKS.values())
+    progress = st.progress(0)
+    current = 0
 
-        total_stocks = sum(len(stocks) for stocks in SECTOR_STOCKS.values())
-        progress = st.progress(0)
-        current = 0
+    for sector, stocks in SECTOR_STOCKS.items():
 
-        for sector, stocks in SECTOR_STOCKS.items():
+        quote_symbols = [f"NSE:{stock}" for stock in stocks]
 
-            quote_symbols = [f"NSE:{stock}" for stock in stocks]
+        try:
+            quotes = kite.quote(quote_symbols)
+        except Exception:
+            continue
+
+        for stock in stocks:
+
+            current += 1
+            progress.progress(current / total_stocks)
 
             try:
-                quotes = kite.quote(quote_symbols)
+                if stock not in instrument_map:
+                    continue
+
+                quote_key = f"NSE:{stock}"
+
+                if quote_key not in quotes:
+                    continue
+
+                q = quotes[quote_key]
+
+                last_price = q["last_price"]
+                close_price = q["ohlc"]["close"]
+                live_volume = q["volume"]
+                avg_price = q["average_price"]
+
+                if close_price == 0:
+                    continue
+
+                change_pct = ((last_price - close_price) / close_price) * 100
+
+                avg_volume, avg_turnover = get_20d_cash_data(
+                    kite,
+                    instrument_map[stock]
+                )
+
+                if avg_volume is None or avg_turnover is None:
+                    continue
+
+                turnover_today = avg_price * live_volume
+                turnover_cr = turnover_today / 10000000
+
+                rvol = live_volume / avg_volume if avg_volume > 0 else 0
+                rturnover = turnover_today / avg_turnover if avg_turnover > 0 else 0
+
+                spread = calculate_spread(q)
+
+                fut_oi = 0
+                oi_ratio = 0
+
+                if stock in futures_map:
+                    fut_item = futures_map[stock]
+                    fut_symbol = f"NFO:{fut_item['tradingsymbol']}"
+
+                    try:
+                        fut_quote = kite.quote(fut_symbol)[fut_symbol]
+                        fut_oi = fut_quote.get("oi", 0)
+
+                        avg_oi_20 = get_20d_fut_oi(
+                            kite,
+                            fut_item["instrument_token"]
+                        )
+
+                        oi_ratio = fut_oi / avg_oi_20 if avg_oi_20 > 0 else 0
+
+                    except Exception:
+                        pass
+
+                r_factor = calculate_r_factor(
+                    change_pct,
+                    rvol,
+                    rturnover,
+                    oi_ratio,
+                    spread
+                )
+
+                direction = "LONG" if change_pct > 0 else "SHORT"
+
+                results.append({
+                    "Sector": sector,
+                    "Stock": stock,
+                    "Direction": direction,
+                    "Change %": round(change_pct, 2),
+                    "Volume": live_volume,
+                    "Turnover Cr": round(turnover_cr, 2),
+                    "RVOL": round(rvol, 2),
+                    "RTurnover": round(rturnover, 2),
+                    "Futures OI": fut_oi,
+                    "OI Ratio": round(oi_ratio, 2),
+                    "Spread %": spread if spread is not None else "NA",
+                    "R-Factor": r_factor
+                })
+
             except Exception:
                 continue
 
-            for stock in stocks:
+    return pd.DataFrame(results)
 
-                current += 1
-                progress.progress(current / total_stocks)
 
-                try:
-                    if stock not in instrument_map:
-                        continue
+if api_key and access_token:
 
-                    quote_key = f"NSE:{stock}"
+    st.caption("Auto-refresh enabled: scanner updates every 1 minute.")
 
-                    if quote_key not in quotes:
-                        continue
+    try:
+        with st.spinner("Running scanner..."):
+            result_df = run_scanner(api_key, access_token)
 
-                    q = quotes[quote_key]
-
-                    last_price = q["last_price"]
-                    close_price = q["ohlc"]["close"]
-                    live_volume = q["volume"]
-                    avg_price = q["average_price"]
-
-                    if close_price == 0:
-                        continue
-
-                    change_pct = ((last_price - close_price) / close_price) * 100
-
-                    avg_volume, avg_turnover = get_20d_cash_data(
-                        kite,
-                        instrument_map[stock]
-                    )
-
-                    if avg_volume is None or avg_turnover is None:
-                        continue
-
-                    turnover_today = avg_price * live_volume
-                    turnover_cr = turnover_today / 10000000
-
-                    rvol = live_volume / avg_volume if avg_volume > 0 else 0
-                    rturnover = turnover_today / avg_turnover if avg_turnover > 0 else 0
-
-                    spread = calculate_spread(q)
-
-                    fut_oi = 0
-                    oi_ratio = 0
-
-                    if stock in futures_map:
-                        fut_item = futures_map[stock]
-                        fut_symbol = f"NFO:{fut_item['tradingsymbol']}"
-
-                        try:
-                            fut_quote = kite.quote(fut_symbol)[fut_symbol]
-                            fut_oi = fut_quote.get("oi", 0)
-
-                            avg_oi_20 = get_20d_fut_oi(
-                                kite,
-                                fut_item["instrument_token"]
-                            )
-
-                            oi_ratio = fut_oi / avg_oi_20 if avg_oi_20 > 0 else 0
-
-                        except Exception:
-                            pass
-
-                    r_factor = calculate_r_factor(
-                        change_pct,
-                        rvol,
-                        rturnover,
-                        oi_ratio,
-                        spread
-                    )
-
-                    direction = "LONG" if change_pct > 0 else "SHORT"
-
-                    results.append({
-                        "Sector": sector,
-                        "Stock": stock,
-                        "Direction": direction,
-                        "Change %": round(change_pct, 2),
-                        "Volume": live_volume,
-                        "Turnover Cr": round(turnover_cr, 2),
-                        "RVOL": round(rvol, 2),
-                        "RTurnover": round(rturnover, 2),
-                        "Futures OI": fut_oi,
-                        "OI Ratio": round(oi_ratio, 2),
-                        "Spread %": spread if spread is not None else "NA",
-                        "R-Factor": r_factor
-                    })
-
-                except Exception:
-                    continue
-
-        if not results:
+        if result_df.empty:
             st.warning("No results found.")
 
         else:
-            result_df = pd.DataFrame(results)
-
             active_df = result_df[result_df["R-Factor"] > 0]
 
             if active_df.empty:
@@ -294,14 +298,12 @@ if st.button("Run Scanner"):
                 )
 
                 st.subheader("🔥 Strong Sectors")
-
                 st.dataframe(
                     sector_strength.head(5),
                     use_container_width=True
                 )
 
                 st.subheader("🚀 Top Active Stocks From Strong Sectors")
-
                 st.dataframe(
                     top_active_stocks[
                         [
@@ -324,3 +326,6 @@ if st.button("Run Scanner"):
 
     except Exception as e:
         st.error(str(e))
+
+else:
+    st.info("Enter Kite API Key and Access Token to start scanner.")
